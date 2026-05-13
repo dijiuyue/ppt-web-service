@@ -1,0 +1,350 @@
+# =============================================================================
+# PPT Master - Development Docker Compose
+# Features: hot-reload, exposed ports, debugging tools, volume mounts
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15-alpine
+    container_name: ppt-master-db-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pptmaster}
+      POSTGRES_USER: ${POSTGRES_USER:-pptmaster}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pptmaster}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    networks:
+      - ppt-master-dev-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pptmaster} -d ${POSTGRES_DB:-pptmaster}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Redis Cache & Message Broker
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ppt-master-redis-dev
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data_dev:/data
+    networks:
+      - ppt-master-dev-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # MinIO Object Storage
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    container_name: ppt-master-minio-dev
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data_dev:/data
+    networks:
+      - ppt-master-dev-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Backend API Server (Development with hot-reload)
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: ppt-master-backend-dev
+    restart: unless-stopped
+    environment:
+      # Database
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pptmaster:pptmaster@db:5432/pptmaster}
+      # Redis
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # MinIO
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-pptmaster}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      # LLM
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openai}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-gpt-4o}
+      # PPT Master Skill
+      PPT_MASTER_SKILL_DIR: ${PPT_MASTER_SKILL_DIR:-/app/ppt-master/skills/ppt-master}
+      # App - DEBUG mode enabled
+      DEBUG: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      LOG_FORMAT: text
+      # CORS - allow all origins in development
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Security
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-production}
+      # Celery
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      # Reload
+      UVICORN_RELOAD: "true"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # Mount source code for hot-reload
+      - ./backend:/app
+      # Exclude virtual env and cache
+      - /app/__pycache__
+      - /app/.pytest_cache
+      - /app/.mypy_cache
+      # Mount PPT Master skill directory
+      - ${PPT_MASTER_SKILL_HOST_PATH:-ppt_master_skill_dev}:/app/ppt-master:ro
+      # Uploads
+      - backend_uploads_dev:/app/uploads
+    networks:
+      - ppt-master-dev-network
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    command: >
+      uvicorn app.main:app 
+      --host 0.0.0.0 
+      --port 8000 
+      --reload 
+      --reload-dir /app
+      --log-level debug
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    # stdin and tty for debugging
+    stdin_open: true
+    tty: true
+
+  # ---------------------------------------------------------------------------
+  # Celery Worker (Development)
+  # ---------------------------------------------------------------------------
+  celery_worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.celery
+    container_name: ppt-master-celery-dev
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pptmaster:pptmaster@db:5432/pptmaster}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-pptmaster}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openai}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-gpt-4o}
+      PPT_MASTER_SKILL_DIR: ${PPT_MASTER_SKILL_DIR:-/app/ppt-master/skills/ppt-master}
+      DEBUG: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+      LOG_FORMAT: text
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+    volumes:
+      # Mount source code for hot-reload (Celery auto-reloads tasks)
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/.pytest_cache
+      - /app/.mypy_cache
+      - ${PPT_MASTER_SKILL_HOST_PATH:-ppt_master_skill_dev}:/app/ppt-master:ro
+      - backend_uploads_dev:/app/uploads
+      - celery_tmp_dev:/app/tmp
+    networks:
+      - ppt-master-dev-network
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # Use lower concurrency in development
+    command: >
+      celery -A app.celery_app worker 
+      --loglevel=debug 
+      --concurrency=1 
+      --prefetch-multiplier=1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    stdin_open: true
+    tty: true
+
+  # ---------------------------------------------------------------------------
+  # Frontend Development Server (Vite dev server with HMR)
+  # ---------------------------------------------------------------------------
+  frontend:
+    image: node:20-alpine
+    container_name: ppt-master-frontend-dev
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      # Vite dev server settings
+      HOST: "0.0.0.0"
+      PORT: 5173
+      # API proxy target
+      VITE_API_BASE_URL: http://localhost:8000
+      VITE_WS_BASE_URL: ws://localhost:8000
+    ports:
+      - "${FRONTEND_DEV_PORT:-5173}:5173"
+    volumes:
+      - ./frontend:/app
+      - node_modules_dev:/app/node_modules
+    networks:
+      - ppt-master-dev-network
+    command: >
+      sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    stdin_open: true
+    tty: true
+
+  # ---------------------------------------------------------------------------
+  # Optional: pgAdmin - PostgreSQL management tool
+  # ---------------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: ppt-master-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@pptmaster.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data_dev:/var/lib/pgadmin
+    networks:
+      - ppt-master-dev-network
+    depends_on:
+      - db
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    profiles:
+      - tools
+
+  # ---------------------------------------------------------------------------
+  # Optional: Redis Insight - Redis GUI
+  # ---------------------------------------------------------------------------
+  redisinsight:
+    image: redis/redisinsight:2.46
+    container_name: ppt-master-redisinsight
+    restart: unless-stopped
+    ports:
+      - "${REDIS_INSIGHT_PORT:-5540}:5540"
+    volumes:
+      - redisinsight_data_dev:/data
+    networks:
+      - ppt-master-dev-network
+    depends_on:
+      - redis
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+    profiles:
+      - tools
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data_dev:
+    driver: local
+  redis_data_dev:
+    driver: local
+  minio_data_dev:
+    driver: local
+  backend_uploads_dev:
+    driver: local
+  celery_tmp_dev:
+    driver: local
+  node_modules_dev:
+    driver: local
+  pgadmin_data_dev:
+    driver: local
+  redisinsight_data_dev:
+    driver: local
+  ppt_master_skill_dev:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  ppt-master-dev-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

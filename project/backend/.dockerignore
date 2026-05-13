@@ -1,0 +1,73 @@
+# =============================================================================
+# Backend Docker Ignore
+# Prevents unnecessary files from being copied into the Docker image
+# =============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.tox/
+.coverage
+htmlcov/
+*.cover
+
+# Development files
+.env
+.env.*
+!.env.example
+*.log
+logs/
+
+# Local uploads and temp files
+uploads/
+tmp/
+temp/
+
+# Alembic (keep the migrations, ignore local dev files)
+alembic.ini.bak
+
+# Documentation (not needed in runtime image)
+docs/
+*.md
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Misc
+*.drawio
+*.plantuml

@@ -1,0 +1,121 @@
+# =============================================================================
+# PPT Master - Celery Worker Dockerfile
+# Based on backend image with different entrypoint/command
+# =============================================================================
+
+# ------------------------------------------------------------------------------
+# Stage 1: Builder
+# ------------------------------------------------------------------------------
+FROM python:3.11-slim AS builder
+
+LABEL maintainer="PPT Master Team"
+LABEL stage=builder
+
+# Prevent Python from writing .pyc files and buffering stdout
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Python dependencies
+COPY backend/requirements.txt /tmp/requirements.txt
+RUN pip install --upgrade pip && \
+    pip install -r /tmp/requirements.txt
+
+# ------------------------------------------------------------------------------
+# Stage 2: Runtime
+# ------------------------------------------------------------------------------
+FROM python:3.11-slim AS runtime
+
+LABEL maintainer="PPT Master Team"
+LABEL service=celery-worker
+
+# Prevent Python from writing .pyc files and buffering stdout
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONFAULTHANDLER=1 \
+    # App settings
+    APP_HOME=/app \
+    APP_USER=appuser \
+    APP_GROUP=appgroup \
+    # Virtual env
+    VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH"
+
+# Install system runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        # Font support
+        fonts-liberation \
+        fonts-dejavu-core \
+        fonts-freefont-ttf \
+        fontconfig \
+        # Document conversion
+        pandoc \
+        pandoc-data \
+        # PDF processing
+        poppler-utils \
+        # PostgreSQL client library
+        libpq5 \
+        # Healthcheck & utilities
+        curl \
+        netcat-openbsd \
+        ca-certificates \
+    && fc-cache -fv \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create non-root user/group
+RUN groupadd --gid 1000 ${APP_GROUP} && \
+    useradd --uid 1000 --gid ${APP_GROUP} \
+        --create-home --home-dir ${APP_HOME} \
+        --shell /bin/bash ${APP_USER}
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+
+# Set working directory
+WORKDIR ${APP_HOME}
+
+# Copy backend source code (Celery tasks are defined in backend)
+COPY --chown=${APP_USER}:${APP_GROUP} backend/ ${APP_HOME}/
+
+# Copy entrypoint script
+COPY --chown=${APP_USER}:${APP_GROUP} docker/entrypoint.celery.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Create necessary directories and set permissions
+RUN mkdir -p ${APP_HOME}/logs ${APP_HOME}/tmp ${APP_HOME}/uploads && \
+    chown -R ${APP_USER}:${APP_GROUP} ${APP_HOME}
+
+# Switch to non-root user
+USER ${APP_USER}
+
+# Health check - check Celery worker is responsive
+# Uses celery inspect ping to verify worker is active
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD celery -A app.celery_app inspect ping --timeout 10 || exit 1
+
+# Entrypoint
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# Default command - start Celery worker
+# - concurrency: number of worker processes (auto = CPU count)
+# - prefetch_multiplier: disable prefetching for long-running tasks
+CMD ["celery", "-A", "app.celery_app", "worker", \
+     "--loglevel=info", \
+     "--concurrency=2", \
+     "--prefetch-multiplier=1", \
+     "--without-gossip", \
+     "--without-mingle", \
+     "--without-heartbeat"]

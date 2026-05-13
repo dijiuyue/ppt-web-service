@@ -1,0 +1,70 @@
+# =============================================================================
+# PPT Master - Frontend Dockerfile
+# Multi-stage build: builder (node) + runtime (nginx)
+# =============================================================================
+
+# ------------------------------------------------------------------------------
+# Stage 1: Builder - Build Vue 3 application
+# ------------------------------------------------------------------------------
+FROM node:20-alpine AS builder
+
+LABEL maintainer="PPT Master Team"
+LABEL stage=builder
+
+# Set working directory
+WORKDIR /app
+
+# Install dependencies first (better layer caching)
+COPY frontend/package*.json ./
+RUN npm ci --only=production=false
+
+# Copy source code
+COPY frontend/ ./
+
+# Build application
+RUN npm run build
+
+# ------------------------------------------------------------------------------
+# Stage 2: Runtime - Nginx to serve static files
+# ------------------------------------------------------------------------------
+FROM nginx:1.25-alpine AS runtime
+
+LABEL maintainer="PPT Master Team"
+LABEL service=frontend
+
+# Install curl for healthcheck
+RUN apk add --no-cache curl
+
+# Remove default nginx configuration
+RUN rm /etc/nginx/conf.d/default.conf
+
+# Copy custom nginx configuration
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy built application from builder stage
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Create non-root user for nginx
+RUN addgroup -S nginx-group -g 1000 && \
+    adduser -S nginx-user -G nginx-group -u 1000
+
+# Fix permissions
+RUN chown -R nginx-user:nginx-group /usr/share/nginx/html && \
+    chown -R nginx-user:nginx-group /var/cache/nginx && \
+    chown -R nginx-user:nginx-group /var/log/nginx && \
+    chown -R nginx-user:nginx-group /etc/nginx/conf.d && \
+    touch /var/run/nginx.pid && \
+    chown nginx-user:nginx-group /var/run/nginx.pid
+
+# Switch to non-root user
+USER nginx-user
+
+# Expose HTTP port
+EXPOSE 80
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:80/health || exit 1
+
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]

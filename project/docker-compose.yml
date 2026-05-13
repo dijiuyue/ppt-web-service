@@ -1,0 +1,406 @@
+# =============================================================================
+# PPT Master - Production Docker Compose
+# =============================================================================
+
+version: "3.8"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15-alpine
+    container_name: ppt-master-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pptmaster}
+      POSTGRES_USER: ${POSTGRES_USER:-pptmaster}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pptmaster}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ppt-master-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pptmaster} -d ${POSTGRES_DB:-pptmaster}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # Redis Cache & Message Broker
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: ppt-master-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - ppt-master-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # MinIO Object Storage
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    container_name: ppt-master-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    networks:
+      - ppt-master-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Backend API Server
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: ppt-master-backend
+    restart: unless-stopped
+    environment:
+      # Database
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pptmaster:pptmaster@db:5432/pptmaster}
+      # Redis
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # MinIO
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-pptmaster}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      # LLM
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openai}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-gpt-4o}
+      # PPT Master Skill
+      PPT_MASTER_SKILL_DIR: ${PPT_MASTER_SKILL_DIR:-/app/ppt-master/skills/ppt-master}
+      # App
+      DEBUG: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+      # CORS
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      # Security
+      SECRET_KEY: ${SECRET_KEY}
+      # Celery
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+    volumes:
+      # Mount PPT Master skill directory (read-only)
+      - ${PPT_MASTER_SKILL_HOST_PATH:-ppt_master_skill}:/app/ppt-master:ro
+      # Temporary upload directory
+      - backend_uploads:/app/uploads
+    networks:
+      - ppt-master-network
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    # Do not expose backend port directly - all traffic goes through frontend nginx
+
+  # ---------------------------------------------------------------------------
+  # Celery Worker
+  # ---------------------------------------------------------------------------
+  celery_worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.celery
+    container_name: ppt-master-celery
+    restart: unless-stopped
+    environment:
+      # Database
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pptmaster:pptmaster@db:5432/pptmaster}
+      # Redis
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # MinIO
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-pptmaster}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      # LLM
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openai}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-gpt-4o}
+      # PPT Master Skill
+      PPT_MASTER_SKILL_DIR: ${PPT_MASTER_SKILL_DIR:-/app/ppt-master/skills/ppt-master}
+      # App
+      DEBUG: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+      # Celery
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      # Worker-specific
+      C_FORCE_ROOT: "false"
+      CELERY_WORKER_MAX_TASKS_PER_CHILD: "50"
+    volumes:
+      - ${PPT_MASTER_SKILL_HOST_PATH:-ppt_master_skill}:/app/ppt-master:ro
+      - backend_uploads:/app/uploads
+      - celery_tmp:/app/tmp
+    networks:
+      - ppt-master-network
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+      replicas: ${CELERY_WORKER_REPLICAS:-1}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    # Celery worker does not expose any ports
+
+  # ---------------------------------------------------------------------------
+  # Celery Beat (Scheduler) - Optional, for periodic tasks
+  # ---------------------------------------------------------------------------
+  celery_beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.celery
+    container_name: ppt-master-celery-beat
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pptmaster:pptmaster@db:5432/pptmaster}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-pptmaster}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      DEFAULT_LLM_PROVIDER: ${DEFAULT_LLM_PROVIDER:-openai}
+      DEFAULT_LLM_MODEL: ${DEFAULT_LLM_MODEL:-gpt-4o}
+      PPT_MASTER_SKILL_DIR: ${PPT_MASTER_SKILL_DIR:-/app/ppt-master/skills/ppt-master}
+      DEBUG: "false"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+    volumes:
+      - ${PPT_MASTER_SKILL_HOST_PATH:-ppt_master_skill}:/app/ppt-master:ro
+      - celery_beat_state:/app/celerybeat
+    networks:
+      - ppt-master-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      celery -A app.celery_app beat 
+      --loglevel=info 
+      --schedule /app/celerybeat/celerybeat-schedule
+      --pidfile /app/celerybeat/celerybeat.pid
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Nginx + Vue SPA)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: ppt-master-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    networks:
+      - ppt-master-network
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # MinIO Console Proxy (optional - for development)
+  # ---------------------------------------------------------------------------
+  minio_console:
+    image: nginx:1.25-alpine
+    container_name: ppt-master-minio-console
+    restart: unless-stopped
+    ports:
+      - "${MINIO_CONSOLE_PORT:-9001}:80"
+    networks:
+      - ppt-master-network
+    depends_on:
+      minio:
+        condition: service_healthy
+    configs:
+      - source: minio_console_conf
+        target: /etc/nginx/conf.d/default.conf
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  backend_uploads:
+    driver: local
+  celery_tmp:
+    driver: local
+  celery_beat_state:
+    driver: local
+  ppt_master_skill:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  ppt-master-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# =============================================================================
+# Configs
+# =============================================================================
+configs:
+  minio_console_conf:
+    content: |
+      server {
+        listen 80;
+        location / {
+          proxy_pass http://minio:9001;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+        }
+      }
