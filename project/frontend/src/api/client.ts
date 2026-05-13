@@ -67,11 +67,25 @@ class ApiClient {
     )
   }
 
+  private formatErrorDetail(detail: unknown): string {
+    if (!detail) return ''
+    if (typeof detail === 'string') return detail
+    if (Array.isArray(detail)) {
+      return detail.map((e: { msg?: string; loc?: unknown[] }) =>
+        e.msg || JSON.stringify(e)
+      ).join('; ')
+    }
+    if (typeof detail === 'object') {
+      return JSON.stringify(detail)
+    }
+    return String(detail)
+  }
+
   private handleError(error: AxiosError) {
     if (error.response) {
       const status = error.response.status
-      const data = error.response.data as { detail?: string; message?: string } | undefined
-      const message = data?.detail || data?.message || `请求失败 (${status})`
+      const data = error.response.data as { detail?: unknown; message?: string } | undefined
+      const message = this.formatErrorDetail(data?.detail) || data?.message || `请求失败 (${status})`
 
       switch (status) {
         case 400:

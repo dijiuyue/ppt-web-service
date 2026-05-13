@@ -33,7 +33,7 @@ export async function deleteProject(id: string): Promise<void> {
 }
 
 export async function startPipeline(projectId: string): Promise<unknown> {
-  return http.post(`/api/projects/${projectId}/start`)
+  return http.post(`/api/projects/${projectId}/start`, {})
 }
 
 export async function cancelPipeline(projectId: string): Promise<unknown> {

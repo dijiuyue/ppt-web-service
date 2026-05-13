@@ -117,7 +117,7 @@ async def get_job_history(
     },
 )
 async def resume_pipeline(
-    request: PipelineResumeRequest,
+    request: PipelineResumeRequest = PipelineResumeRequest(),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),

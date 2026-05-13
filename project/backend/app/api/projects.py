@@ -208,7 +208,7 @@ async def delete_project(
     },
 )
 async def start_pipeline(
-    request: ProjectStartRequest,
+    request: ProjectStartRequest = ProjectStartRequest(),
     project: Project = Depends(get_current_project),
     db: AsyncSession = Depends(get_db),
     storage: StorageBackend = Depends(get_storage),
