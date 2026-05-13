@@ -37,13 +37,12 @@ const activeStep = ref(0)
 const formRef = ref<InstanceType<typeof ElForm>>()
 const isSubmitting = ref(false)
 
-const form = reactive<CreateProjectRequest & { llm_base_url?: string }>({
+const form = reactive<CreateProjectRequest>({
   name: '',
   description: '',
   canvas_format: 'ppt169',
   llm_provider: 'openai',
   llm_model: 'gpt-4o',
-  llm_base_url: '',
   template_path: undefined
 })
 
@@ -282,25 +281,10 @@ const goBack = () => {
             />
           </ElFormItem>
 
-          <ElFormItem label="API Base URL (可选)">
-            <ElInput
-              v-model="form.llm_base_url"
-              placeholder="留空使用默认地址，DeepSeek 默认: https://api.deepseek.com"
-              size="large"
-            >
-              <template #prefix>
-                <ElIcon><Setting /></ElIcon>
-              </template>
-            </ElInput>
-            <div class="form-hint">
-              如需使用代理或自定义端点，请填写完整 URL
-            </div>
-          </ElFormItem>
-
           <div class="llm-hint">
             <ElIcon><Setting /></ElIcon>
             <span>
-              您可以在<strong>系统设置</strong>中配置API密钥
+              您可以在<strong>系统设置</strong>中配置API密钥和Base URL
             </span>
           </div>
         </ElCard>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref, onMounted } from 'vue'
+import { reactive, ref, computed, watch, onMounted } from 'vue'
 import {
   ElForm,
   ElFormItem,
@@ -34,6 +34,7 @@ const settings = reactive<AppSettings>({
   llm_api_key: '',
   llm_provider: 'openai',
   llm_model: 'gpt-4o',
+  llm_base_url: '',
   default_canvas_format: 'ppt169',
   theme: 'light'
 })
@@ -43,23 +44,51 @@ const modelOptions = computed(() => {
     return [
       { value: 'gpt-4o', label: 'GPT-4o (推荐)' },
       { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
-      { value: 'gpt-4', label: 'GPT-4' }
+      { value: 'gpt-4', label: 'GPT-4' },
+      { value: '__custom__', label: '自定义模型...' }
+    ]
+  }
+  if (settings.llm_provider === 'deepseek') {
+    return [
+      { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro (推荐)' },
+      { value: 'deepseek-reasoner', label: 'DeepSeek Reasoner' },
+      { value: 'deepseek-chat', label: 'DeepSeek Chat' },
+      { value: '__custom__', label: '自定义模型...' }
     ]
   }
   return [
     { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
     { value: 'claude-opus-4-20250514', label: 'Claude Opus 4' },
-    { value: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet' }
+    { value: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet' },
+    { value: '__custom__', label: '自定义模型...' }
   ]
 })
 
-import { computed, watch } from 'vue'
+const showCustomModel = ref(false)
+const customModel = ref('')
 
 watch(() => settings.llm_provider, () => {
+  showCustomModel.value = false
+  customModel.value = ''
   if (settings.llm_provider === 'openai') {
     settings.llm_model = 'gpt-4o'
+  } else if (settings.llm_provider === 'deepseek') {
+    settings.llm_model = 'deepseek-v4-pro'
   } else {
     settings.llm_model = 'claude-sonnet-4-20250514'
+  }
+})
+
+watch(() => settings.llm_model, (newVal) => {
+  if (newVal === '__custom__') {
+    showCustomModel.value = true
+    settings.llm_model = customModel.value || ''
+  }
+})
+
+watch(customModel, (newVal) => {
+  if (showCustomModel.value) {
+    settings.llm_model = newVal
   }
 })
 
@@ -97,14 +126,18 @@ const handleReset = () => {
   settings.llm_api_key = ''
   settings.llm_provider = 'openai'
   settings.llm_model = 'gpt-4o'
+  settings.llm_base_url = ''
   settings.default_canvas_format = 'ppt169'
   settings.theme = 'light'
+  showCustomModel.value = false
+  customModel.value = ''
   ElMessage.info('已重置为默认设置')
 }
 
 const providers: { value: LLMProvider; label: string }[] = [
   { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' }
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'deepseek', label: 'DeepSeek' }
 ]
 
 const canvasFormats = [
@@ -169,7 +202,7 @@ const canvasFormats = [
           </ElFormItem>
 
           <ElFormItem label="默认模型">
-            <ElSelect v-model="settings.llm_model" class="full-width" size="large">
+            <ElSelect v-if="!showCustomModel" v-model="settings.llm_model" class="full-width" size="large">
               <ElOption
                 v-for="model in modelOptions"
                 :key="model.value"
@@ -177,6 +210,28 @@ const canvasFormats = [
                 :value="model.value"
               />
             </ElSelect>
+            <ElInput
+              v-else
+              v-model="customModel"
+              placeholder="输入模型名称，如 deepseek-v4-pro"
+              size="large"
+            />
+          </ElFormItem>
+
+          <ElFormItem label="API Base URL (可选)">
+            <ElInput
+              v-model="settings.llm_base_url"
+              placeholder="留空使用默认地址"
+              size="large"
+            >
+              <template #prefix>
+                <ElIcon><Setting /></ElIcon>
+              </template>
+            </ElInput>
+            <div class="form-hint">
+              <ElIcon><InfoFilled /></ElIcon>
+              <span>DeepSeek 用户可填写 https://api.deepseek.com，或使用代理地址</span>
+            </div>
           </ElFormItem>
         </ElForm>
       </ElCard>
